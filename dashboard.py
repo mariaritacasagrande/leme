@@ -1,486 +1,443 @@
 """
-Dashboard de Monetização - Minutagem e Hashtags
-Foco: Identificar criadores monetizáveis por minutagem
+Dashboard Unificado - API ou Upload de URLs
+YouTube, Instagram, TikTok: Busca por hashtag OU upload de planilha
 """
 
 import streamlit as st
 import pandas as pd
-import plotly.express as px
-import plotly.graph_objects as go
+import subprocess
+import json
+import time
+from datetime import datetime
 from social_media_scraper import SocialMediaScraper
 
 st.set_page_config(
-    page_title="Dashboard Monetização",
-    page_icon="💰",
+    page_title="Dashboard Completo",
+    page_icon="📊",
     layout="wide"
 )
 
-st.markdown("""
-    <style>
-    .main {padding: 0rem 1rem;}
-    .stMetric {background-color: #f0f2f6; padding: 10px; border-radius: 5px;}
-    </style>
-""", unsafe_allow_html=True)
+
+def extrair_duracao_url(url):
+    """Extrai duração usando yt-dlp (sem API)"""
+    try:
+        cmd = ['yt-dlp', '--dump-json', '--no-playlist', '--no-warnings', url]
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+        
+        if result.returncode == 0:
+            data = json.loads(result.stdout)
+            duracao_seg = data.get('duration', 0)
+            
+            if duracao_seg:
+                horas = int(duracao_seg // 3600)
+                minutos = int((duracao_seg % 3600) // 60)
+                segundos = int(duracao_seg % 60)
+                
+                if horas > 0:
+                    duracao_fmt = f"{horas:02d}:{minutos:02d}:{segundos:02d}"
+                else:
+                    duracao_fmt = f"{minutos:02d}:{segundos:02d}"
+                
+                # Extrair título se disponível
+                titulo = data.get('title', 'Sem título')
+                criador = data.get('uploader', data.get('channel', 'Desconhecido'))
+                
+                return {
+                    'segundos': duracao_seg,
+                    'formatada': duracao_fmt,
+                    'titulo': titulo,
+                    'criador': criador,
+                    'status': 'ok'
+                }
+        
+        return {'segundos': 0, 'formatada': 'Erro', 'status': 'erro'}
+    
+    except Exception as e:
+        return {'segundos': 0, 'formatada': 'Erro', 'status': f'erro: {str(e)}'}
 
 
-def create_dashboard(data):
-    """Dashboard focado em monetização por minutagem"""
-    df = pd.DataFrame(data)
+def processar_upload(df, coluna_url, tempo_minimo_seg):
+    """Processa planilha de URLs e extrai minutagem"""
     
-    st.title("💰 Dashboard de Monetização")
-    st.markdown("**Análise de minutagem para identificar conteúdo monetizável**")
-    st.markdown("---")
+    if coluna_url not in df.columns:
+        st.error(f"❌ Coluna '{coluna_url}' não encontrada")
+        return None
     
-    # SIDEBAR: Filtros
-    st.sidebar.header("⚙️ Filtros")
+    # Criar colunas resultado
+    df['Plataforma'] = ''
+    df['Criador'] = ''
+    df['Título'] = ''
+    df['Duração (seg)'] = 0
+    df['Duração'] = ''
+    df['Status'] = ''
+    df['Monetizável'] = ''
     
-    # Filtro de minutagem mínima
-    min_minutos = st.sidebar.number_input(
-        "Minutagem mínima (minutos)",
-        min_value=0,
-        max_value=60,
-        value=1,
-        help="Vídeos acima deste tempo são monetizáveis"
-    )
+    progress_bar = st.progress(0)
+    status_text = st.empty()
     
-    min_segundos = min_minutos * 60
+    total = len(df)
+    sucesso = 0
+    erro = 0
     
-    # Filtro por plataforma
-    plataformas_selecionadas = st.sidebar.multiselect(
-        "Plataformas",
-        options=df['plataforma'].unique(),
-        default=df['plataforma'].unique()
-    )
-    
-    # Aplicar filtros
-    df_filtrado = df[
-        (df['duracao_segundos'] >= min_segundos) &
-        (df['plataforma'].isin(plataformas_selecionadas))
-    ]
-    
-    # MÉTRICAS PRINCIPAIS
-    col1, col2, col3, col4 = st.columns(4)
-    
-    with col1:
-        total_videos = len(df_filtrado)
-        st.metric("Vídeos Monetizáveis", total_videos)
-    
-    with col2:
-        criadores_unicos = df_filtrado['perfil'].nunique()
-        st.metric("Criadores Únicos", criadores_unicos)
-    
-    with col3:
-        duracao_media = df_filtrado['duracao_segundos'].mean()
-        min_media = int(duracao_media // 60)
-        seg_media = int(duracao_media % 60)
-        st.metric("Minutagem Média", f"{min_media}:{seg_media:02d}")
-    
-    with col4:
-        # Percentual de vídeos monetizáveis
-        perc_monetizavel = (len(df_filtrado) / len(df)) * 100 if len(df) > 0 else 0
-        st.metric("% Monetizável", f"{perc_monetizavel:.1f}%")
-    
-    st.markdown("---")
-    
-    # TABS POR PLATAFORMA
-    tabs = st.tabs([f"📱 {plat}" for plat in df['plataforma'].unique()])
-    
-    for i, plataforma in enumerate(df['plataforma'].unique()):
-        with tabs[i]:
-            df_plat = df_filtrado[df_filtrado['plataforma'] == plataforma]
-            
-            if len(df_plat) == 0:
-                st.warning(f"Nenhum vídeo monetizável no {plataforma} com os filtros atuais")
-                continue
-            
-            # Métricas da plataforma
-            col1, col2, col3 = st.columns(3)
-            
-            with col1:
-                st.metric(f"Vídeos {plataforma}", len(df_plat))
-            
-            with col2:
-                st.metric(f"Criadores {plataforma}", df_plat['perfil'].nunique())
-            
-            with col3:
-                duracao_media_plat = df_plat['duracao_segundos'].mean()
-                min_p = int(duracao_media_plat // 60)
-                seg_p = int(duracao_media_plat % 60)
-                st.metric(f"Minutagem Média", f"{min_p}:{seg_p:02d}")
-            
-            st.markdown("#### 📊 Distribuição de Minutagem")
-            
-            # Gráfico de minutagem
-            df_plat_sorted = df_plat.sort_values('duracao_segundos', ascending=False).copy()
-            df_plat_sorted['duracao_minutos'] = df_plat_sorted['duracao_segundos'] / 60
-            
-            fig = px.bar(
-                df_plat_sorted,
-                x=df_plat_sorted.index,
-                y='duracao_minutos',
-                hover_data=['perfil', 'titulo', 'duracao_formatada'],
-                labels={'duracao_minutos': 'Duração (minutos)', 'index': 'Vídeo'},
-                color='duracao_minutos',
-                color_continuous_scale='Viridis'
-            )
-            
-            # Linha de corte de monetização
-            fig.add_hline(
-                y=min_minutos, 
-                line_dash="dash", 
-                line_color="red",
-                annotation_text=f"Mínimo Monetizável: {min_minutos} min"
-            )
-            
-            fig.update_layout(
-                showlegend=False,
-                height=300,
-                xaxis_title="",
-                xaxis={'visible': False}
-            )
-            
-            st.plotly_chart(fig, use_container_width=True)
-            
-            st.markdown("#### 📋 Vídeos Detalhados")
-            
-            # Preparar dados para exibição
-            df_display = df_plat_sorted[[
-                'perfil', 'titulo', 'duracao_formatada', 
-                'likes', 'comentarios', 'data_publicacao', 'url'
-            ]].copy()
-            
-            df_display.columns = [
-                'Criador', 'Título', 'Duração', 
-                'Likes', 'Comentários', 'Data', 'URL'
-            ]
-            
-            # Adicionar indicador de monetização
-            df_display.insert(0, '💰', '✅')
-            
-            st.dataframe(
-                df_display,
-                use_container_width=True,
-                height=400,
-                column_config={
-                    "URL": st.column_config.LinkColumn("Link", width="small")
-                }
-            )
-            
-            # Top criadores por minutagem média
-            st.markdown("#### 🏆 Top Criadores por Minutagem Média")
-            
-            criadores_plat = df_plat.groupby('perfil').agg({
-                'duracao_segundos': ['mean', 'count'],
-                'titulo': 'first'
-            }).round(0)
-            
-            criadores_plat.columns = ['duracao_media_seg', 'num_videos', 'exemplo']
-            criadores_plat['duracao_media'] = criadores_plat['duracao_media_seg'].apply(
-                lambda x: f"{int(x//60)}:{int(x%60):02d}"
-            )
-            
-            criadores_plat = criadores_plat.sort_values('duracao_media_seg', ascending=False)
-            
-            col1, col2 = st.columns([2, 1])
-            
-            with col1:
-                st.dataframe(
-                    criadores_plat[['num_videos', 'duracao_media']],
-                    use_container_width=True,
-                    column_config={
-                        'num_videos': 'Nº Vídeos',
-                        'duracao_media': 'Minutagem Média'
-                    }
-                )
-            
-            with col2:
-                # Gráfico de pizza
-                fig_criadores = px.pie(
-                    values=criadores_plat['num_videos'].values,
-                    names=criadores_plat.index,
-                    title=f"Distribuição de Vídeos"
-                )
-                fig_criadores.update_layout(height=300)
-                st.plotly_chart(fig_criadores, use_container_width=True)
-    
-    st.markdown("---")
-    
-    # ANÁLISE COMPARATIVA
-    st.subheader("📊 Comparação Entre Plataformas")
-    
-    col1, col2 = st.columns(2)
-    
-    with col1:
-        # Comparação de minutagem média
-        plat_stats = df_filtrado.groupby('plataforma').agg({
-            'duracao_segundos': 'mean',
-            'perfil': 'count'
-        }).round(0)
+    for idx, row in df.iterrows():
+        url = str(row[coluna_url]).strip()
         
-        plat_stats.columns = ['duracao_media_seg', 'total_videos']
-        plat_stats['duracao_formatada'] = plat_stats['duracao_media_seg'].apply(
-            lambda x: f"{int(x//60)}:{int(x%60):02d}"
+        if pd.isna(url) or url == '' or url == 'nan':
+            df.at[idx, 'Status'] = 'URL vazia'
+            continue
+        
+        status_text.text(f"Processando {idx + 1}/{total}: {url[:50]}...")
+        
+        # Identificar plataforma
+        if 'tiktok.com' in url.lower():
+            plataforma = 'TikTok'
+        elif 'instagram.com' in url.lower():
+            plataforma = 'Instagram'
+        elif 'youtube.com' in url.lower() or 'youtu.be' in url.lower():
+            plataforma = 'YouTube'
+        else:
+            plataforma = 'Outra'
+        
+        df.at[idx, 'Plataforma'] = plataforma
+        
+        # Extrair duração
+        resultado = extrair_duracao_url(url)
+        
+        df.at[idx, 'Duração (seg)'] = resultado['segundos']
+        df.at[idx, 'Duração'] = resultado['formatada']
+        df.at[idx, 'Status'] = resultado['status']
+        
+        if resultado['status'] == 'ok':
+            df.at[idx, 'Criador'] = resultado.get('criador', 'Desconhecido')
+            df.at[idx, 'Título'] = resultado.get('titulo', 'Sem título')
+            df.at[idx, 'Monetizável'] = '✅' if resultado['segundos'] >= tempo_minimo_seg else '❌'
+            sucesso += 1
+        else:
+            df.at[idx, 'Monetizável'] = '❌'
+            erro += 1
+        
+        progress_bar.progress((idx + 1) / total)
+        time.sleep(0.5)
+    
+    progress_bar.empty()
+    status_text.empty()
+    
+    st.success(f"✅ Concluído! Sucesso: {sucesso} | Erro: {erro}")
+    
+    return df
+
+
+def tab_api(plataforma):
+    """Tab para busca por API"""
+    st.subheader(f"🔍 Busca por Hashtag - {plataforma}")
+    
+    with st.form(f"form_api_{plataforma}"):
+        hashtag = st.text_input(
+            "Hashtag",
+            placeholder="Ex: tecnologia",
+            key=f"hashtag_{plataforma}"
         )
         
-        st.markdown("**Minutagem Média por Plataforma:**")
-        st.dataframe(
-            plat_stats[['total_videos', 'duracao_formatada']],
-            column_config={
-                'total_videos': 'Total Vídeos',
-                'duracao_formatada': 'Duração Média'
-            }
-        )
-    
-    with col2:
-        # Gráfico de barras
-        fig_comp = px.bar(
-            x=plat_stats.index,
-            y=plat_stats['duracao_media_seg'] / 60,
-            labels={'x': 'Plataforma', 'y': 'Duração Média (minutos)'},
-            color=plat_stats['duracao_media_seg'] / 60,
-            color_continuous_scale='Viridis'
-        )
-        fig_comp.update_layout(showlegend=False, height=250)
-        st.plotly_chart(fig_comp, use_container_width=True)
-    
-    st.markdown("---")
-    
-    # BUSCAR CRIADOR ESPECÍFICO
-    st.subheader("🔍 Buscar Criador")
-    
-    criador_busca = st.text_input(
-        "Digite o nome do criador/canal",
-        placeholder="Ex: DoctorRamani"
-    )
-    
-    if criador_busca:
-        df_criador = df[df['perfil'].str.contains(criador_busca, case=False, na=False)]
+        col1, col2 = st.columns(2)
         
-        if len(df_criador) > 0:
-            st.success(f"✅ Encontrados {len(df_criador)} vídeos")
-            
-            col1, col2, col3 = st.columns(3)
-            
-            with col1:
-                st.metric("Total Vídeos", len(df_criador))
-            
-            with col2:
-                duracao_criador = df_criador['duracao_segundos'].mean()
-                min_c = int(duracao_criador // 60)
-                seg_c = int(duracao_criador % 60)
-                st.metric("Minutagem Média", f"{min_c}:{seg_c:02d}")
-            
-            with col3:
-                monetizaveis = len(df_criador[df_criador['duracao_segundos'] >= min_segundos])
-                st.metric("Vídeos Monetizáveis", monetizaveis)
-            
-            df_criador_display = df_criador[[
-                'plataforma', 'titulo', 'duracao_formatada', 
-                'likes', 'comentarios', 'data_publicacao', 'url'
-            ]].copy()
-            
-            df_criador_display.columns = [
-                'Plataforma', 'Título', 'Duração',
-                'Likes', 'Comentários', 'Data', 'URL'
-            ]
-            
-            # Marcar monetizáveis
-            df_criador_display.insert(
-                0, 
-                '💰', 
-                df_criador['duracao_segundos'].apply(lambda x: '✅' if x >= min_segundos else '❌')
+        with col1:
+            tempo_minimo = st.number_input(
+                "Minutagem mínima (minutos)",
+                min_value=0.0,
+                max_value=60.0,
+                value=1.0,
+                step=0.5,
+                key=f"tempo_{plataforma}"
             )
-            
-            st.dataframe(
-                df_criador_display,
-                use_container_width=True,
-                column_config={
-                    "URL": st.column_config.LinkColumn("Link")
-                }
+        
+        with col2:
+            max_results = st.slider(
+                "Máximo de resultados",
+                10, 50, 20, 5,
+                key=f"max_{plataforma}"
+            )
+        
+        if plataforma == "YouTube":
+            api_key = st.text_input(
+                "YouTube API Key",
+                type="password",
+                help="Obtenha em console.cloud.google.com",
+                key=f"key_{plataforma}"
             )
         else:
-            st.warning("❌ Nenhum vídeo encontrado para este criador")
-
-
-def main():
-    st.sidebar.title("💰 Monetização")
-    st.sidebar.markdown("---")
-    
-    menu = st.sidebar.radio(
-        "Menu",
-        ["📊 Dashboard", "🔄 Coletar Dados", "ℹ️ Info"]
-    )
-    
-    if menu == "🔄 Coletar Dados":
-        st.title("🔄 Coletar Dados")
+            api_key = None
+            st.info(f"⚠️ API do {plataforma} não configurada. Dados de exemplo serão usados.")
         
-        with st.form("coleta_form"):
-            hashtag = st.text_input(
-                "Hashtag para buscar",
-                placeholder="Ex: lovebombing, tecnologia",
-                help="Digite sem o símbolo #"
-            )
-            
-            youtube_api_key = st.text_input(
-                "YouTube API Key (opcional)",
-                type="password",
-                help="Deixe em branco para usar dados de exemplo"
-            )
-            
-            max_results = st.slider(
-                "Máximo de resultados por plataforma",
-                min_value=10,
-                max_value=50,
-                value=30,
-                step=10
-            )
-            
-            submit = st.form_submit_button("🚀 Iniciar Coleta")
+        submit = st.form_submit_button("🚀 Buscar")
+    
+    if submit and hashtag:
+        segundos_minimo = tempo_minimo * 60
         
-        if submit and hashtag:
-            with st.spinner("Coletando dados..."):
-                try:
-                    scraper = SocialMediaScraper()
+        with st.spinner(f"Buscando no {plataforma}..."):
+            try:
+                scraper = SocialMediaScraper()
+                
+                if api_key:
+                    scraper.configure_apis(youtube_key=api_key)
+                
+                # Buscar apenas na plataforma específica
+                if plataforma == "YouTube":
+                    data_raw = scraper.search_youtube(hashtag, max_results)
+                elif plataforma == "Instagram":
+                    data_raw = scraper.search_instagram(hashtag, max_results)
+                else:  # TikTok
+                    data_raw = scraper.search_tiktok(hashtag, max_results)
+                
+                # Filtrar por minutagem
+                data_filtrada = [
+                    video for video in data_raw 
+                    if video['duracao_segundos'] >= segundos_minimo
+                ]
+                
+                if len(data_filtrada) == 0:
+                    st.warning(f"⚠️ Nenhum vídeo ≥ {tempo_minimo} min")
+                    st.info(f"Total encontrado: {len(data_raw)}, todos abaixo de {tempo_minimo} min")
+                else:
+                    # Salvar nos session_state específicos da plataforma
+                    st.session_state[f'data_{plataforma}'] = data_filtrada
+                    st.session_state[f'hashtag_{plataforma}'] = hashtag
+                    st.session_state[f'tempo_{plataforma}'] = tempo_minimo
                     
-                    if youtube_api_key:
-                        scraper.configure_apis(youtube_key=youtube_api_key)
+                    st.success(f"✅ {len(data_filtrada)} vídeos encontrados (≥ {tempo_minimo} min)")
                     
-                    data = scraper.search_all_platforms(hashtag, max_results)
+                    # Mostrar resultado
+                    df = pd.DataFrame(data_filtrada)
                     
-                    st.session_state['data'] = data
-                    st.session_state['hashtag'] = hashtag
+                    df_display = df[[
+                        'perfil', 'titulo', 'duracao_formatada',
+                        'likes', 'comentarios', 'data_publicacao', 'url'
+                    ]].copy()
                     
-                    filename = scraper.export_to_excel(f"dados_{hashtag}.xlsx")
+                    df_display.columns = [
+                        'Criador', 'Título', 'Duração',
+                        'Likes', 'Comentários', 'Data', 'URL'
+                    ]
                     
-                    st.success(f"✅ {len(data)} posts coletados!")
+                    st.dataframe(df_display, use_container_width=True, height=400)
+                    
+                    # Download
+                    scraper.data = data_filtrada
+                    filename = f"dados_{plataforma}_{hashtag}_{tempo_minimo}min.xlsx"
+                    scraper.export_to_excel(filename)
                     
                     with open(filename, 'rb') as f:
                         st.download_button(
-                            label="📥 Download Excel",
-                            data=f,
+                            "📥 Download Excel",
+                            f,
                             file_name=filename,
-                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                            key=f"download_api_{plataforma}"
                         )
-                    
-                    st.info("👉 Vá para 'Dashboard' para ver a análise")
-                    
-                except Exception as e:
-                    st.error(f"❌ Erro: {str(e)}")
-        
-        elif submit:
-            st.warning("⚠️ Digite uma hashtag")
+            
+            except Exception as e:
+                st.error(f"❌ Erro: {str(e)}")
     
-    elif menu == "📊 Dashboard":
-        if 'data' in st.session_state and st.session_state['data']:
-            hashtag = st.session_state.get('hashtag', 'desconhecida')
-            st.sidebar.success(f"✅ Hashtag: #{hashtag}")
-            create_dashboard(st.session_state['data'])
-        else:
-            st.info("""
-            ### 📊 Nenhum dado carregado
+    elif submit:
+        st.warning("⚠️ Digite a hashtag")
+
+
+def tab_upload(plataforma):
+    """Tab para upload de URLs"""
+    st.subheader(f"📤 Upload de URLs - {plataforma}")
+    
+    st.info(f"""
+    **Como funciona:**
+    1. Faça upload de Excel/CSV com URLs do {plataforma}
+    2. Sistema extrai minutagem automaticamente (sem API)
+    3. Download do arquivo atualizado
+    """)
+    
+    uploaded = st.file_uploader(
+        f"Upload planilha com URLs do {plataforma}",
+        type=['xlsx', 'xls', 'csv'],
+        key=f"upload_{plataforma}"
+    )
+    
+    if uploaded:
+        try:
+            if uploaded.name.endswith('.csv'):
+                df = pd.read_csv(uploaded)
+            else:
+                df = pd.read_excel(uploaded)
             
-            1. Vá em "Coletar Dados"
-            2. Digite a hashtag
-            3. Cole YouTube API Key (ou deixe em branco para dados de exemplo)
-            4. Clique "Iniciar Coleta"
-            5. Retorne aqui
+            st.success(f"✅ Arquivo carregado: {len(df)} linhas")
             
-            Ou carregue um Excel existente:
-            """)
+            with st.expander("👁️ Ver preview"):
+                st.dataframe(df.head(10))
             
-            uploaded_file = st.file_uploader("Carregar Excel", type=['xlsx'])
+            col1, col2 = st.columns(2)
             
-            if uploaded_file:
+            with col1:
+                coluna_url = st.selectbox(
+                    "Coluna com URLs",
+                    options=df.columns.tolist(),
+                    key=f"coluna_{plataforma}"
+                )
+            
+            with col2:
+                tempo_minimo_upload = st.number_input(
+                    "Minutagem mínima (minutos)",
+                    min_value=0.0,
+                    max_value=60.0,
+                    value=1.0,
+                    step=0.5,
+                    key=f"tempo_upload_{plataforma}"
+                )
+            
+            # Teste limitado
+            limitar = st.checkbox(
+                "Processar apenas primeiras linhas (teste)",
+                value=False,
+                key=f"limitar_{plataforma}"
+            )
+            
+            if limitar:
+                n_linhas = st.number_input(
+                    "Quantas linhas?",
+                    min_value=1,
+                    max_value=len(df),
+                    value=min(5, len(df)),
+                    key=f"n_linhas_{plataforma}"
+                )
+                df_processar = df.head(n_linhas).copy()
+            else:
+                df_processar = df.copy()
+            
+            if st.button(f"⏱️ Extrair Minutagem", key=f"extrair_{plataforma}"):
+                # Verificar yt-dlp
                 try:
-                    df = pd.read_excel(uploaded_file)
-                    st.session_state['data'] = df.to_dict('records')
-                    st.success("✅ Arquivo carregado!")
-                    st.rerun()
-                except Exception as e:
-                    st.error(f"❌ Erro: {str(e)}")
+                    subprocess.run(['yt-dlp', '--version'], 
+                                 capture_output=True, check=True)
+                except:
+                    st.error("""
+                    ❌ **yt-dlp não está instalado!**
+                    
+                    Adicione ao requirements.txt:
+                    ```
+                    yt-dlp>=2024.3.10
+                    ```
+                    """)
+                    return
+                
+                segundos_minimo = tempo_minimo_upload * 60
+                
+                st.info(f"Processando {len(df_processar)} URLs...")
+                
+                df_resultado = processar_upload(df_processar, coluna_url, segundos_minimo)
+                
+                if df_resultado is not None:
+                    # Filtrar apenas monetizáveis
+                    df_monetizavel = df_resultado[df_resultado['Monetizável'] == '✅']
+                    
+                    col1, col2, col3 = st.columns(3)
+                    
+                    with col1:
+                        st.metric("Total Processado", len(df_resultado))
+                    
+                    with col2:
+                        st.metric("✅ Monetizáveis", len(df_monetizavel))
+                    
+                    with col3:
+                        perc = (len(df_monetizavel) / len(df_resultado) * 100) if len(df_resultado) > 0 else 0
+                        st.metric("% Monetizável", f"{perc:.1f}%")
+                    
+                    st.markdown("---")
+                    st.markdown("**Resultado:**")
+                    
+                    st.dataframe(
+                        df_resultado,
+                        use_container_width=True,
+                        height=400
+                    )
+                    
+                    # Download
+                    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                    filename = f"{plataforma}_minutagem_{timestamp}.xlsx"
+                    df_resultado.to_excel(filename, index=False)
+                    
+                    with open(filename, 'rb') as f:
+                        st.download_button(
+                            "📥 Download Excel Atualizado",
+                            f,
+                            file_name=filename,
+                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                            key=f"download_upload_{plataforma}"
+                        )
+        
+        except Exception as e:
+            st.error(f"❌ Erro: {str(e)}")
+
+
+def main():
+    st.title("📊 Dashboard Completo - API ou Upload")
+    st.markdown("**Escolha: Buscar por hashtag (API) OU Upload de URLs**")
+    st.markdown("---")
     
-    else:  # Info
-        st.title("ℹ️ Sobre o Dashboard")
+    # Tabs principais por plataforma
+    tab1, tab2, tab3 = st.tabs(["▶️ YouTube", "📸 Instagram", "🎵 TikTok"])
+    
+    with tab1:
+        st.markdown("## YouTube")
+        subtab1, subtab2 = st.tabs(["🔍 Busca por API", "📤 Upload URLs"])
         
-        st.markdown("""
-        ## 💰 Dashboard de Monetização
+        with subtab1:
+            tab_api("YouTube")
         
-        ### 🎯 O que este dashboard faz:
+        with subtab2:
+            tab_upload("YouTube")
+    
+    with tab2:
+        st.markdown("## Instagram")
+        subtab1, subtab2 = st.tabs(["🔍 Busca por API", "📤 Upload URLs"])
         
-        **Identifica conteúdo monetizável por minutagem:**
+        with subtab1:
+            tab_api("Instagram")
         
-        - Define **minutagem mínima** para monetização (ex: 1 min)
-        - Mostra quais vídeos **passam** deste limite
-        - Filtra vídeos **monetizáveis por plataforma**
-        - Lista todos os **criadores que usam a hashtag**
+        with subtab2:
+            tab_upload("Instagram")
+    
+    with tab3:
+        st.markdown("## TikTok")
+        subtab1, subtab2 = st.tabs(["🔍 Busca por API", "📤 Upload URLs"])
         
-        ### 📊 Análise por Plataforma:
+        with subtab1:
+            tab_api("TikTok")
         
-        **Abas separadas** para cada plataforma:
-        - YouTube
-        - Instagram  
-        - TikTok
-        
-        Em cada aba você vê:
-        - Quantos vídeos são monetizáveis
-        - Minutagem média
-        - Distribuição de duração
-        - Lista detalhada de todos os vídeos
-        - Top criadores por minutagem
-        
-        ### 💰 Como funciona a monetização:
-        
-        **Requisitos típicos:**
-        - YouTube: geralmente >1 minuto
-        - Instagram Reels: geralmente >60 segundos
-        - TikTok: geralmente >1 minuto
-        
-        O dashboard mostra:
-        - ✅ Vídeos que passam do mínimo
-        - ❌ Vídeos abaixo do mínimo
-        - Percentual de conteúdo monetizável
-        
-        ### 🔍 Busca por Criador:
-        
-        Digite o nome de qualquer criador para ver:
-        - Todos os vídeos dele
-        - Quais são monetizáveis
-        - Minutagem média
-        - Performance individual
-        
-        ### 📋 Dados Detalhados:
-        
-        Para cada vídeo você vê:
-        - Criador/Canal
-        - Título completo
-        - **Duração (minutagem)**
-        - Likes e comentários
-        - Data de publicação
-        - Link direto
-        
-        ### ⚙️ Filtros:
-        
-        - **Minutagem mínima**: Ajuste conforme necessário
-        - **Plataformas**: Selecione quais ver
-        
-        ### 🎯 Casos de uso:
-        
-        1. **Identificar criadores monetizáveis**
-           - Filtrar por minutagem mínima
-           - Ver quais criadores cumprem requisito
-        
-        2. **Analisar performance por plataforma**
-           - Comparar YouTube vs Instagram vs TikTok
-           - Ver onde o conteúdo é mais longo
-        
-        3. **Buscar criadores específicos**
-           - Verificar se usam a hashtag
-           - Ver minutagem dos vídeos deles
-        
-        4. **Comparar plataformas**
-           - Qual tem vídeos mais longos?
-           - Qual tem mais criadores?
-        """)
+        with subtab2:
+            tab_upload("TikTok")
+    
+    # Sidebar info
+    st.sidebar.title("ℹ️ Como Usar")
+    st.sidebar.markdown("""
+    ### Duas formas de coletar dados:
+    
+    **1. Busca por API (Hashtag)**
+    - YouTube: Requer API Key
+    - Instagram: Dados de exemplo
+    - TikTok: Dados de exemplo
+    - Define minutagem mínima
+    - Busca e filtra automaticamente
+    
+    **2. Upload de URLs**
+    - Faça upload de planilha
+    - Sistema extrai minutagem (sem API)
+    - Funciona com qualquer plataforma
+    - Marca vídeos monetizáveis
+    
+    ---
+    
+    ### Para Upload funcionar:
+    
+    Adicione ao `requirements.txt`:
+    ```
+    yt-dlp>=2024.3.10
+    ```
+    """)
 
 
 if __name__ == "__main__":
