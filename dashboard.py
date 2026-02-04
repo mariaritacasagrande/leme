@@ -431,13 +431,9 @@ def main():
     
     ---
     
-    ### Para Upload funcionar:
+    ### Feito com ❤️ por Maria Rita Casagrande
     
-    Adicione ao `requirements.txt`:
-    ```
-    yt-dlp>=2024.3.10
-    ```
-    """)
+       """)
 
 
 if __name__ == "__main__":
